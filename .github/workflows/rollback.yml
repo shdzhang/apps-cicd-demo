@@ -1,0 +1,65 @@
+name: Rollback prod
+
+# Manual rollback: re-deploy a previous tag/commit to prod.
+# This is the rollback story for Databricks Apps — there is no native one-click
+# rollback, so we replay an older Git revision through the same DAB pipeline.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or commit SHA to roll prod back to (e.g. v1.2.0)"
+        required: true
+      reason:
+        description: "Why are you rolling back? (audit trail)"
+        required: true
+
+concurrency:
+  group: release-prod
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: prod  # Same approval gate as release.yml
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_PROD_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_CLIENT_SECRET }}
+    steps:
+      - name: Log rollback intent
+        run: |
+          echo "::notice title=Rollback initiated::Rolling prod to ${{ github.event.inputs.ref }}. Reason: ${{ github.event.inputs.reason }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: databricks/setup-cli@main
+
+      - run: npm ci
+      - run: npm run build:client && npm run build:server
+
+      - name: Show prior deployment history (before rollback)
+        run: databricks apps list-deployments db-chatbot-prod --output json | head -80
+
+      - name: Validate bundle
+        run: databricks bundle validate -t prod
+
+      - name: Re-deploy older revision
+        run: |
+          databricks bundle deploy -t prod \
+            --var="git_sha=${{ github.sha }}" \
+            --var="git_ref=${{ github.event.inputs.ref }}"
+
+      - name: Start app
+        run: databricks bundle run databricks_chatbot -t prod
+
+      - name: Show deployment history (after rollback)
+        run: databricks apps list-deployments db-chatbot-prod --output json | head -80

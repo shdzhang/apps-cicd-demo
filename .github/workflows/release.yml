@@ -1,0 +1,94 @@
+name: Release (staging → prod)
+
+# Triggered by pushing a semantic-version tag (v1.2.3).
+# Stage 1: deploy to staging.
+# Stage 2: production deploy, gated by GitHub environment approval (configure in repo settings).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or commit SHA to release"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_STAGING_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_STAGING_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: databricks/setup-cli@main
+
+      - run: npm ci
+      - run: npm run build:client && npm run build:server
+
+      - name: Validate bundle (staging)
+        run: databricks bundle validate -t staging
+
+      - name: Deploy to staging
+        run: |
+          databricks bundle deploy -t staging \
+            --var="git_sha=${{ github.sha }}" \
+            --var="git_ref=${{ github.ref_name }}"
+
+      - name: Start staging app
+        run: databricks bundle run databricks_chatbot -t staging
+
+  deploy-prod:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: prod  # Configure required reviewers in repo Settings → Environments
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_PROD_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: databricks/setup-cli@main
+
+      - run: npm ci
+      - run: npm run build:client && npm run build:server
+
+      - name: Validate bundle (prod)
+        run: databricks bundle validate -t prod
+
+      - name: Deploy to prod
+        run: |
+          databricks bundle deploy -t prod \
+            --var="git_sha=${{ github.sha }}" \
+            --var="git_ref=${{ github.ref_name }}"
+
+      - name: Start prod app
+        run: databricks bundle run databricks_chatbot -t prod
+
+      - name: Show deployment history
+        run: databricks apps list-deployments db-chatbot-prod --output json | head -100

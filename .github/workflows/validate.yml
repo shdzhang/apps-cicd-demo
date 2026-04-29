@@ -1,0 +1,54 @@
+name: Validate
+
+# Runs on every PR and on pushes to non-main branches.
+# Pure read-only — no Databricks deployment, no secrets needed for compile/test/lint.
+# Bundle validation runs in dry-run mode using the dev SP to check schema only.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run build:client && npm run build:server
+
+      - name: Unit tests
+        run: npx playwright test --project=unit --reporter=list
+
+  bundle-validate:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_DEV_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_DEV_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      - name: Validate dev target
+        run: databricks bundle validate -t dev
+
+      - name: Validate staging target
+        run: databricks bundle validate -t staging
+
+      - name: Validate prod target
+        run: databricks bundle validate -t prod

@@ -1,0 +1,51 @@
+name: Deploy to Dev
+
+# Runs on every push to main: build + bundle deploy + bundle run against dev target.
+# Embeds the Git SHA so the running app exposes what's live.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_DEV_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_DEV_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: databricks/setup-cli@main
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build client + server
+        run: npm run build:client && npm run build:server
+
+      - name: Validate bundle
+        run: databricks bundle validate -t dev
+
+      - name: Deploy bundle
+        run: |
+          databricks bundle deploy -t dev \
+            --var="git_sha=${{ github.sha }}" \
+            --var="git_ref=${{ github.ref_name }}"
+
+      - name: Start app
+        run: databricks bundle run databricks_chatbot -t dev

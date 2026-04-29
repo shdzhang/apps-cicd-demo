@@ -1,0 +1,105 @@
+bundle:
+  name: databricks-chatbot
+
+# CI/CD reference for an agentic chat app on Databricks Apps:
+# OBO authorization + Agent Bricks (or Foundation Model) + Lakebase chat history.
+#
+# Targets dev / staging / prod share one workspace in this demo (separated by
+# resource_name_suffix). In production, point each target at its own workspace.
+
+variables:
+  serving_endpoint_name:
+    description: "Model serving endpoint (Agent Bricks endpoint or Foundation Model)"
+    default: databricks-claude-sonnet-4
+  database_instance_name:
+    description: "Base name of the Lakebase instance"
+    default: chatbot-lakebase
+  resource_name_suffix:
+    description: "Suffix for app + Lakebase resource names — keeps environments isolated"
+  app_users_group:
+    description: "Account group granted CAN_USE on the app"
+    default: users
+  app_admins_group:
+    description: "Account group granted CAN_MANAGE on the app"
+    default: admins
+  git_sha:
+    description: "Git SHA of the build (injected by CI for traceability)"
+    default: local-dev
+  git_ref:
+    description: "Git ref (branch or tag) of the build"
+    default: local
+
+resources:
+  database_instances:
+    chatbot_lakebase:
+      name: ${var.database_instance_name}-${var.resource_name_suffix}
+      capacity: CU_1
+
+  apps:
+    databricks_chatbot:
+      name: db-chatbot-${var.resource_name_suffix}
+      description: "Agentic chat app — OBO + Agent Bricks + Lakebase"
+      source_code_path: .
+
+      # OBO scopes — the agent and Lakebase calls run under the user's identity.
+      # `serving.serving-endpoints` lets the app call the agent endpoint as the user.
+      # `dashboards.genie` enables Genie integration when the agent uses Genie spaces.
+      user_api_scopes:
+        - serving.serving-endpoints
+        - dashboards.genie
+        - sql
+        - iam.current-user:read
+
+      resources:
+        - name: serving-endpoint
+          description: "Agent / Foundation Model serving endpoint"
+          serving_endpoint:
+            name: ${var.serving_endpoint_name}
+            permission: CAN_QUERY
+        - name: database
+          description: "Lakebase database instance for chat history"
+          database:
+            database_name: databricks_postgres
+            instance_name: ${resources.database_instances.chatbot_lakebase.name}
+            permission: CAN_CONNECT_AND_CREATE
+
+      config:
+        env:
+          - name: APP_VERSION
+            value: ${var.git_sha}
+          - name: APP_GIT_REF
+            value: ${var.git_ref}
+
+      permissions:
+        - group_name: ${var.app_users_group}
+          level: CAN_USE
+        - group_name: ${var.app_admins_group}
+          level: CAN_MANAGE
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617428812971.11.azuredatabricks.net
+    variables:
+      resource_name_suffix: dev-${workspace.current_user.short_name}
+
+  # In CI, each target deploys as a dedicated service principal
+  # (apps-cicd-staging, apps-cicd-prod). The bundle root lands in the SP's
+  # home folder, so different SPs cannot stomp on each other.
+  staging:
+    mode: production
+    workspace:
+      host: https://adb-7405617428812971.11.azuredatabricks.net
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/staging
+    variables:
+      resource_name_suffix: staging
+
+  prod:
+    mode: production
+    workspace:
+      host: https://adb-7405617428812971.11.azuredatabricks.net
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/prod
+    variables:
+      resource_name_suffix: prod
