@@ -72,13 +72,6 @@ resources:
       permissions:
         - group_name: ${var.app_users_group}
           level: CAN_USE
-        # NOTE: do NOT add the workspace `admins` group here — it has implicit
-        # CAN_MANAGE on all resources and explicit grants are rejected with
-        # "cannot modify admin permissions for apps resources". Override
-        # `var.app_admins_group` if you want to grant CAN_MANAGE to a
-        # non-admin group.
-        # - group_name: ${var.app_admins_group}
-        #   level: CAN_MANAGE
 
 targets:
   dev:
