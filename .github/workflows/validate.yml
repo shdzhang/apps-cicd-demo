@@ -1,8 +1,9 @@
 name: Validate
 
 # Runs on every PR and on pushes to non-main branches.
-# Pure read-only — no Databricks deployment, no secrets needed for compile/test/lint.
-# Bundle validation runs in dry-run mode using the dev SP to check schema only.
+# Lint / typecheck / unit tests run with no Databricks creds.
+# Bundle validation runs once per target, each time scoped to that
+# target's GitHub Environment so it picks up the matching SP creds.
 
 on:
   pull_request:
@@ -35,20 +36,19 @@ jobs:
 
   bundle-validate:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dev, staging, prod]
+    environment: ${{ matrix.target }}
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_DEV_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_DEV_CLIENT_SECRET }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: databricks/setup-cli@main
 
-      - name: Validate dev target
-        run: databricks bundle validate -t dev
-
-      - name: Validate staging target
-        run: databricks bundle validate -t staging
-
-      - name: Validate prod target
-        run: databricks bundle validate -t prod
+      - name: Validate ${{ matrix.target }} target
+        run: databricks bundle validate -t ${{ matrix.target }}
