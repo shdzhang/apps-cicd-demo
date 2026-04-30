@@ -76,21 +76,23 @@ In Account Console → Service principals, create:
 
 Generate an OAuth secret for each. Record `CLIENT_ID` / `CLIENT_SECRET` per SP.
 
-### 3. Configure GitHub repo secrets
+### 3. Configure GitHub Environments + secrets
+
+In repo Settings → Environments, create three environments: `dev`, `staging`, `prod`.
+
+In **each** environment, add the same three secret names with that environment's values:
 
 | Secret | Value |
 |---|---|
-| `DATABRICKS_HOST` | `https://adb-7405617428812971.11.azuredatabricks.net` |
-| `DATABRICKS_DEV_CLIENT_ID` | dev SP client id |
-| `DATABRICKS_DEV_CLIENT_SECRET` | dev SP client secret |
-| `DATABRICKS_STAGING_CLIENT_ID` | staging SP client id |
-| `DATABRICKS_STAGING_CLIENT_SECRET` | staging SP client secret |
-| `DATABRICKS_PROD_CLIENT_ID` | prod SP client id |
-| `DATABRICKS_PROD_CLIENT_SECRET` | prod SP client secret |
+| `DATABRICKS_HOST` | workspace URL (e.g. `https://adb-7405617428812971.11.azuredatabricks.net`) |
+| `DATABRICKS_CLIENT_ID` | the matching SP's client id (dev SP for `dev`, staging SP for `staging`, etc.) |
+| `DATABRICKS_CLIENT_SECRET` | the matching SP's client secret |
 
-### 4. Configure GitHub Environments + approvals
+The workflows reference `secrets.DATABRICKS_CLIENT_ID` and pair it with `environment: <name>` — GitHub resolves the value from whichever environment the job is running in. This keeps each SP's creds scoped to its own environment (better audit, easier rotation) without any per-environment naming in the YAML.
 
-In repo Settings → Environments, create `dev`, `staging`, `prod`. Add **required reviewers** to `prod` so the prod deploy step pauses for human approval.
+### 4. Configure approvals
+
+Still in repo Settings → Environments, on the `prod` environment add **required reviewers** so the prod deploy step pauses for human approval. `dev` and `staging` should have no protection rules — they need to deploy unattended.
 
 ### 5. First-time bundle init
 
