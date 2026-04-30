@@ -83,6 +83,11 @@ targets:
     workspace:
       host: https://adb-7405617428812971.11.azuredatabricks.net
     variables:
+      # Lakebase instance + Databricks Apps names must be DNS-compliant
+      # (lowercase alphanumeric + hyphens, no dots/underscores).
+      # `short_name` may contain a dot (e.g. firstname.lastname) — override at
+      # deploy time if yours does:
+      #   databricks bundle deploy -t dev --var="resource_name_suffix=dev-<your-handle>"
       resource_name_suffix: dev-${workspace.current_user.short_name}
 
   # In CI, each target deploys as a dedicated service principal
