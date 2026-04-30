@@ -48,7 +48,6 @@ resources:
         - serving.serving-endpoints
         - dashboards.genie
         - sql
-        - iam.current-user:read
 
       resources:
         - name: serving-endpoint
@@ -73,8 +72,6 @@ resources:
       permissions:
         - group_name: ${var.app_users_group}
           level: CAN_USE
-        - group_name: ${var.app_admins_group}
-          level: CAN_MANAGE
 
 targets:
   dev:
@@ -83,12 +80,10 @@ targets:
     workspace:
       host: https://adb-7405617428812971.11.azuredatabricks.net
     variables:
-      # Lakebase instance + Databricks Apps names must be DNS-compliant
-      # (lowercase alphanumeric + hyphens, no dots/underscores).
-      # `short_name` may contain a dot (e.g. firstname.lastname) — override at
-      # deploy time if yours does:
-      #   databricks bundle deploy -t dev --var="resource_name_suffix=dev-<your-handle>"
-      resource_name_suffix: dev-${workspace.current_user.short_name}
+      # `domain_friendly_name` sanitizes the email local-part to lowercase
+      # alphanumeric + hyphens — DNS-safe for Lakebase + Databricks Apps names.
+      # (`short_name` would leave dots/underscores in place and break DNS validation.)
+      resource_name_suffix: dev-${workspace.current_user.domain_friendly_name}
 
   # In CI, each target deploys as a dedicated service principal
   # (apps-cicd-staging, apps-cicd-prod). The bundle root lands in the SP's
