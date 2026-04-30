@@ -44,6 +44,7 @@ jobs:
       - name: Deploy bundle
         run: |
           databricks bundle deploy -t dev \
+            --var="resource_name_suffix=dev" \
             --var="git_sha=${{ github.sha }}" \
             --var="git_ref=${{ github.ref_name }}"
 
