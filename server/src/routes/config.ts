@@ -6,6 +6,13 @@ import {
 } from 'express';
 import { isDatabaseAvailable } from '@chat-template/db';
 import { getEndpointOboInfo } from '@chat-template/ai-sdk-providers';
+import { getDatabricksOAuthToken } from '@chat-template/auth';
+
+function getHostUrl(): string | null {
+  const raw = process.env.DATABRICKS_HOST;
+  if (!raw) return null;
+  return `https://${raw.replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
+}
 
 export const configRouter: RouterType = Router();
 
@@ -23,6 +30,61 @@ function getScopesFromToken(token: string): string[] {
     return [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * Read the live deployment's Git ref from the Apps API.
+ *
+ * Git-backed deploys carry the deployed tag/branch/commit + resolved_commit
+ * directly on the deployment record, so this is the source of truth — the
+ * old env-var pattern (`APP_VERSION`/`APP_GIT_REF`) doesn't survive Git-backed
+ * because the repo's `app.yaml` overrides `databricks.yml`'s `config.env`.
+ *
+ * Falls back to env vars (so local dev still shows something) and finally
+ * to `local-dev` / `local`.
+ */
+type Version = { sha: string; ref: string };
+let versionCache: { value: Version; expiresAt: number } | null = null;
+const VERSION_CACHE_MS = 5 * 60 * 1000;
+
+async function fetchDeployedVersion(): Promise<Version> {
+  if (versionCache && Date.now() < versionCache.expiresAt) {
+    return versionCache.value;
+  }
+
+  const fallback: Version = {
+    sha: process.env.APP_VERSION ?? 'local-dev',
+    ref: process.env.APP_GIT_REF ?? 'local',
+  };
+
+  // DATABRICKS_APP_NAME is set by the platform when running in a Databricks App.
+  // Locally, this is unset — return the env-var fallback.
+  const appName = process.env.DATABRICKS_APP_NAME;
+  const hostUrl = getHostUrl();
+  if (!appName || !hostUrl) return fallback;
+
+  try {
+    const token = await getDatabricksOAuthToken();
+    const res = await fetch(`${hostUrl.replace(/\/$/, '')}/api/2.0/apps/${encodeURIComponent(appName)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return fallback;
+    const app = (await res.json()) as {
+      active_deployment?: {
+        git_source?: { tag?: string; branch?: string; commit?: string; resolved_commit?: string };
+      };
+    };
+    const gs = app.active_deployment?.git_source;
+    if (!gs) return fallback;
+    const version: Version = {
+      sha: gs.resolved_commit ?? gs.commit ?? fallback.sha,
+      ref: gs.tag ?? gs.branch ?? gs.commit ?? fallback.ref,
+    };
+    versionCache = { value: version, expiresAt: Date.now() + VERSION_CACHE_MS };
+    return version;
+  } catch {
+    return fallback;
   }
 }
 
@@ -49,6 +111,8 @@ configRouter.get('/', async (req: Request, res: Response) => {
     });
   }
 
+  const version = await fetchDeployedVersion();
+
   res.json({
     features: {
       chatHistory: isDatabaseAvailable(),
@@ -57,9 +121,6 @@ configRouter.get('/', async (req: Request, res: Response) => {
     obo: {
       missingScopes,
     },
-    version: {
-      sha: process.env.APP_VERSION ?? 'local-dev',
-      ref: process.env.APP_GIT_REF ?? 'local',
-    },
+    version,
   });
 });
