@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { Button } from '@/components/ui/button';
-import { GitBranch, MessageSquareOff, TriangleAlert } from 'lucide-react';
+import { GitBranch, TriangleAlert } from 'lucide-react';
 import { useConfig } from '@/hooks/use-config';
 import {
   Tooltip,
@@ -49,12 +49,14 @@ export function ChatHeader({ title, empty, isLoadingTitle }: { title?: string, e
   const navigate = useNavigate();
   const {
     chatHistoryEnabled,
-    feedbackEnabled,
     oboMissingScopes,
     versionSha,
     versionRef,
   } = useConfig();
   const shortSha = versionSha === 'local-dev' ? 'local-dev' : versionSha.slice(0, 7);
+  // Prefer the human-readable ref (tag/branch) over the short SHA. Fall back
+  // to the short SHA when the ref is the default placeholder ("local").
+  const versionLabel = versionRef && versionRef !== 'local' ? versionRef : shortSha;
 
   return (
     <>
@@ -81,7 +83,7 @@ export function ChatHeader({ title, empty, isLoadingTitle }: { title?: string, e
               <TooltipTrigger asChild>
                 <span className='flex items-center gap-1.5 rounded-lg border-1 border-border bg-muted px-2 py-1 text-foreground text-xs'>
                   <GitBranch className="h-3 w-3" />
-                  <span className='hidden font-mono sm:inline'>{shortSha}</span>
+                  <span className='hidden font-mono sm:inline'>{versionLabel}</span>
                 </span>
               </TooltipTrigger>
               <TooltipContent>
@@ -105,26 +107,6 @@ export function ChatHeader({ title, empty, isLoadingTitle }: { title?: string, e
                 </TooltipTrigger>
                 <TooltipContent>
                   <p>Chat history disabled — conversations are not saved. Click to learn more.</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
-          {!feedbackEnabled && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href={DOCS_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className='flex items-center gap-1.5 rounded-lg border-1 border-border bg-muted px-2 py-1 text-foreground text-xs hover:text-foreground'
-                  >
-                    <MessageSquareOff className="h-3 w-3" />
-                    <span className="hidden sm:inline">Feedback disabled</span>
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>Feedback submission disabled. Click to learn more.</p>
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
