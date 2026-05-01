@@ -64,6 +64,9 @@ jobs:
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ github.event.inputs.ref }}"
 
+      - name: Ensure prod compute is running
+        run: databricks apps start db-chatbot-prod
+
       # Rollback = deploy an older Git tag through the same pipeline.
       # `apps list-deployments` will show the deployed tag, so the rollback
       # event is auditable as "deployed v0.1.0 at <time>".

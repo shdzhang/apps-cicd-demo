@@ -58,6 +58,12 @@ jobs:
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
 
+      # `apps deploy` requires the app's compute to be RUNNING. First-time
+      # deploys after `bundle deploy` come up STOPPED — `apps start` is
+      # idempotent (no-op if already running) and blocks until ACTIVE.
+      - name: Ensure app compute is running
+        run: databricks apps start db-chatbot-dev
+
       # Git-backed: the platform pulls source from the configured Git repo at
       # the commit we just merged. `--json` overrides the default branch ref
       # in databricks.yml so each push deploys exactly that commit.

@@ -124,11 +124,36 @@ npm ci
 databricks bundle validate -t dev
 databricks bundle deploy -t dev          # provisions Lakebase + creates app + sets git_repository
 # Now do step 5 (configure SP creds) — needed before first apps deploy
+databricks apps start db-chatbot-dev-<suffix>     # apps come up STOPPED on first creation
 databricks apps deploy db-chatbot-dev-<suffix> \
   --json '{"git_source":{"branch":"main"}}'
 ```
 
 The first deploy provisions a Lakebase instance — give it 5–10 minutes.
+
+> **Why `apps start`?** A freshly-created app (right after `bundle deploy`) is in `STOPPED` compute state. `apps deploy` requires `RUNNING`, so the very first deploy needs an explicit `apps start` first. Subsequent deploys run against an already-running app and don't need it. The CI workflows include `apps start` defensively before every deploy — it's a no-op if the app is already running.
+
+### 7. CI runner constraint (FEVM workspaces only)
+
+If you're running this against a Databricks Field Engineering / FEVM workspace (or any workspace that has IP ACLs enforced), the default GitHub-hosted `ubuntu-latest` runners **will not work** — their egress IPs are not in the workspace allowlist. Per [go/fe-workspace-policy](go/fe-workspace-policy), FEVM IP ACLs admit only:
+
+1. Databricks VPN
+2. **IT-managed GitHub runners**
+3. Other FE demo workspaces
+4. Serverless control + data planes
+
+To run these workflows against an FEVM workspace, the repo must live in a Databricks-EMU GitHub org (private/internal is fine), and the workflows must use IT-managed runners:
+
+```yaml
+# In every workflow file, replace `runs-on: ubuntu-latest` with:
+runs-on:
+  group: ubuntu-runners
+  labels: ubuntu-20.04-16core
+```
+
+Exact group/label names per EMU org are in the [Databricks runners sheet](https://docs.google.com/spreadsheets/d/1g-HjYxGlcpmaHx3nxzwIb_GLcq0YCHpCn-y1csLFwNE/edit?gid=392307713). If your org doesn't have ubuntu runners provisioned, file a Freshservice ticket to IT.
+
+This constraint is FEVM-specific. Customer-managed workspaces typically don't have this restriction unless they've enabled IP ACLs themselves — in which case the workspace admin allowlists their CI runner IPs (or uses self-hosted runners on a network that can reach the workspace).
 
 ## Daily workflow
 

@@ -61,6 +61,12 @@ jobs:
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
 
+      # `apps deploy` requires the app's compute to be RUNNING. First-time
+      # deploys after `bundle deploy` come up STOPPED — `apps start` is
+      # idempotent and blocks until ACTIVE.
+      - name: Ensure staging compute is running
+        run: databricks apps start db-chatbot-staging
+
       # Git-backed: deploy the tag directly. `apps list-deployments` will show
       # the tag/commit on the deployment record, so the lineage is auditable
       # without our app-header workaround.
@@ -112,6 +118,9 @@ jobs:
           databricks bundle deploy -t prod \
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
+
+      - name: Ensure prod compute is running
+        run: databricks apps start db-chatbot-prod
 
       - name: Deploy app from Git (tag)
         run: |
