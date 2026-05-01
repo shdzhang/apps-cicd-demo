@@ -160,8 +160,8 @@ This constraint is FEVM-specific. Customer-managed workspaces typically don't ha
 | Action | What happens |
 |---|---|
 | Open a PR | `validate.yml` runs lint, typecheck, `bundle validate` for all three targets |
-| Merge to `main` | `deploy-dev.yml` deploys + restarts dev app |
-| `git tag v1.2.0 && git push --tags` | `release.yml` deploys staging, then prompts for approval, then deploys prod |
+| Merge to `main` | `deploy-dev.yml` runs `bundle deploy -t dev` + `apps deploy --json '{"git_source":{"commit":"<sha>"}}'` against dev |
+| `git tag v1.2.0 && git push --tags` | `release.yml` deploys staging, then prompts for approval, then deploys prod (both via `apps deploy --json '{"git_source":{"tag":"v1.2.0"}}'`) |
 | Need to roll back | Repo → Actions → "Rollback prod" → enter the previous tag (e.g. `v1.1.5`) and reason |
 
 The running app shows the live build in the header (`v1.2.0` and the short SHA). Roll back, refresh — header updates instantly.
@@ -170,14 +170,24 @@ The running app shows the live build in the header (`v1.2.0` and the short SHA).
 
 ## Rollback strategy
 
-There is no native one-click rollback in Databricks Apps — both rollback paths re-deploy older code through the same pipeline. This repo implements both:
+There is no native one-click rollback in Databricks Apps — both rollback paths re-deploy an older Git tag through the same `apps deploy --json` mechanism. This repo implements both:
 
 | Path | When to use | Mechanism |
 |---|---|---|
-| **`workflow_dispatch` re-deploy** (primary) | Any rollback, urgent or planned | `rollback.yml` checks out the target tag, runs `bundle deploy + bundle run` against prod |
+| **`workflow_dispatch` re-deploy** (primary) | Any rollback, urgent or planned | `rollback.yml` runs `bundle deploy -t prod` (resource shape) + `apps deploy db-chatbot-prod --json '{"git_source":{"tag":"<old-tag>"}}'` |
 | **Revert PR on `main`** (follow-up) | Trunk hygiene after a rollback | Open a "Revert <bad PR>" PR; flows through dev → staging → prod normally so `main` HEAD = what's running |
 
 **Why `workflow_dispatch` is primary** (and not just break-glass): it's what [Databricks officially recommends](https://docs.databricks.com/aws/en/dev-tools/ci-cd/best-practices), it preserves the prod approval gate, and it's faster than waiting for a revert PR to traverse the full pipeline. The revert PR is the *trunk-hygiene step*, not the rollback itself.
+
+**Verified rollback flow** (tested 2026-05-01 against the dev workspace — `db-chatbot-prod`):
+
+```
+2026-05-01 09:38  SUCCEEDED  tag=v0.1.0 (rollback)  resolved=834e83ec5b ← live
+2026-05-01 09:35  SUCCEEDED  tag=v0.2.0             resolved=38d044e63e
+2026-05-01 09:28  SUCCEEDED  tag=v0.1.0 (initial)   resolved=834e83ec5b
+```
+
+The placeholder text in the chat input is the visible diff: v0.2.0 shows "Ask anything..."; v0.1.0 shows "Ask a question...". After rollback the placeholder reverts and the deployment ledger gets a new row pointing at the old commit — same git ref as the original v0.1.0, different `deployment_id`, fresh `create_time`.
 
 **Traceability:** With Git-backed deploy, the deployment record itself carries the Git ref. `databricks apps list-deployments` returns rows where each `git_source` looks like:
 
@@ -200,6 +210,75 @@ App rollback covers code only. A schema migration applied by the bad release is 
 3. **If successful:** keep the branch 48–72h as a safety net, then drop
 
 Always write **forward-compatible migrations** (add nullable column → dual-write → drop old column in a separate release) so a code rollback never requires a schema rollback.
+
+## Manual mode (terminal) — when CI runners can't reach the workspace
+
+For environments where GitHub Actions runners can't reach the workspace (FEVM IP ACL, air-gapped customer envs, etc.), the same flow runs from a terminal authenticated to the workspace. Use this as the canonical CLI runbook — every workflow YAML step has a 1:1 terminal equivalent.
+
+Variables used below — adjust to your suffix names:
+
+```bash
+export DATABRICKS_CONFIG_PROFILE=<your-profile>
+DEV_APP=db-chatbot-dev-<your-username-suffix>
+STAGING_APP=db-chatbot-staging
+PROD_APP=db-chatbot-prod
+```
+
+### Release v1.2.0: tag → staging → prod
+
+```bash
+git tag -a v1.2.0 -m "release notes"
+git push origin v1.2.0
+
+# Staging
+databricks bundle deploy -t staging \
+  --var="git_sha=$(git rev-parse HEAD)" --var="git_ref=v1.2.0"
+databricks apps start "$STAGING_APP"     # no-op if already running
+databricks apps deploy "$STAGING_APP" --json '{"git_source":{"tag":"v1.2.0"}}'
+
+# Smoke test against staging URL — open the app, send a message, check the version badge
+
+# Prod (manual approval gate = you typing this command after sign-off)
+databricks bundle deploy -t prod \
+  --var="git_sha=$(git rev-parse HEAD)" --var="git_ref=v1.2.0"
+databricks apps start "$PROD_APP"
+databricks apps deploy "$PROD_APP" --json '{"git_source":{"tag":"v1.2.0"}}'
+```
+
+### Rollback prod to v1.1.5 (the most recent good tag)
+
+```bash
+# Bundle deploy is unchanged for code-only rollback, but run it for symmetry
+# in case the resource shape from the bad tag was different
+databricks bundle deploy -t prod \
+  --var="git_sha=$(git rev-parse v1.1.5)" --var="git_ref=v1.1.5"
+
+databricks apps start "$PROD_APP"
+databricks apps deploy "$PROD_APP" --json '{"git_source":{"tag":"v1.1.5"}}'
+
+# Confirm
+databricks apps list-deployments "$PROD_APP" --output json \
+  | jq '.[0:3] | .[] | {state: .status.state, tag: .git_source.tag, resolved_commit: .git_source.resolved_commit, create_time}'
+```
+
+The new deployment row will show `tag=v1.1.5` with the resolved_commit matching v1.1.5 — that's the audit answer to "what's running now."
+
+### Dev pushes (the loop you'll iterate on most)
+
+```bash
+git push origin main           # or whatever branch you're working on
+SHA=$(git rev-parse HEAD)
+databricks bundle deploy -t dev --var="resource_name_suffix=dev-<suffix>" \
+  --var="git_sha=$SHA" --var="git_ref=$(git rev-parse --abbrev-ref HEAD)"
+databricks apps start "$DEV_APP"
+databricks apps deploy "$DEV_APP" --json "{\"git_source\":{\"commit\":\"$SHA\"}}"
+```
+
+For dev, deploying by `commit` (not `tag`) is the natural fit — every push is a unique deployment record.
+
+### When you have CI runners with workspace access
+
+Skip this section. `validate.yml`, `deploy-dev.yml`, `release.yml`, and `rollback.yml` automate everything above. The terminal commands here are exactly what those workflows run, just unwrapped.
 
 ## Local development
 
