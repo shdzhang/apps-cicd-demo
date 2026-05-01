@@ -54,9 +54,7 @@ jobs:
       - name: Deploy bundle (resources only — Git-backed source)
         run: |
           databricks bundle deploy -t dev \
-            --var="resource_name_suffix=dev" \
-            --var="git_sha=${{ steps.git.outputs.sha }}" \
-            --var="git_ref=${{ steps.git.outputs.ref }}"
+            --var="resource_name_suffix=dev"
 
       # `apps deploy` requires the app's compute to be RUNNING. First-time
       # deploys after `bundle deploy` come up STOPPED — `apps start` is

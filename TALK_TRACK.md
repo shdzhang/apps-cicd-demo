@@ -45,7 +45,7 @@ Merge the PR. Switch to Actions → `Deploy to Dev`. While it runs:
 - `bundle deploy -t dev` — applies terraform-managed resources (app config, Lakebase, permissions, scopes, `git_repository` association). No source upload — the app's `source_code_path` field is gone, replaced by `git_source`.
 - `apps deploy <app> --json '{"git_source":{"commit":"<sha>"}}'` — the platform clones the repo (via the SP's Git credential) at that exact commit and rolls out a deployment.
 
-Refresh the app — version badge updates to the new SHA. Open the deployment list in the terminal: `git_source.resolved_commit` shows the deployed commit on the deployment record itself.
+Refresh the app — the version badge in the header updates to the new tag (e.g. `v1.2.0`). The badge reads from the Apps API at runtime (`active_deployment.git_source` — see `server/src/routes/config.ts`), so it always reflects what's actually deployed without us injecting env vars from CI. Open the deployment list in the terminal: `git_source.resolved_commit` shows the same commit on the deployment record itself.
 
 ### 4. Cut a release — staging then prod (5 min)
 
@@ -80,7 +80,7 @@ Walk the workflow:
 - The new deployment record carries `git_source.tag = "v0.1.0"` and `resolved_commit` for that tag. `apps list-deployments` reads as a clean ledger — `tag/branch/commit` + `resolved_commit` are right there per row, no audit-log workaround needed.
 - Lakebase data is preserved — only the app code rolls back.
 
-Refresh the app — header now shows `v0.1.0` and the older SHA. Chat history is still there.
+Refresh the app — header badge now reads `v0.1.0` and the placeholder reverts to "Ask a question..." (the visible diff between v0.1.0 and the rolled-back tag). Chat history is still there. The badge updates because the API-based read picks up the new active deployment on next refresh.
 
 Key line: *"There's no native rollback button in Databricks. Rollback in this model = re-deploy a known-good tag through the same pipeline. Same path, same audit, same approvals — that's the feature."*
 

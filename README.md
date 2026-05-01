@@ -17,7 +17,7 @@ The point of this repo is the **pipeline shape**, not the chat app itself. Use i
 | **Agent Bricks** | App calls a `serving_endpoint` (default `databricks-claude-sonnet-4` — swap for a custom Agent Bricks endpoint) |
 | **Lakebase** | Managed Postgres provisioned by the bundle; chat history persists across deployments and rollbacks. (See [Lakebase Autoscaling note](#a-note-on-lakebase-autoscaling) below.) |
 | **DABs lifecycle** | One `databricks.yml`, three targets (`dev` / `staging` / `prod`), parameterised by suffix |
-| **Versioning** | Deployment record carries `git_source.tag/branch/commit` + `resolved_commit` natively; app header still surfaces `git_sha` for in-app visibility |
+| **Versioning** | Deployment record carries `git_source.tag/branch/commit` + `resolved_commit` natively; app header reads the active deployment from the Apps API at runtime (cached 5 min) and surfaces the tag prominently — see `server/src/routes/config.ts` |
 | **CI gates** | PR validation, automatic dev deploy, tag-driven staging→prod release with approval |
 | **Rollback** | `workflow_dispatch` action that re-deploys an older Git tag through the same pipeline |
 | **Audit** | `apps list-deployments` shows tag/branch + resolved commit per deployment; `system.access.audit` for sharing/permission events |
@@ -199,7 +199,9 @@ The placeholder text in the chat input is the visible diff: v0.2.0 shows "Ask an
 }
 ```
 
-So `apps list-deployments` is a self-documenting release ledger: you can see the deployed tag/branch and the exact commit it resolved to, with no app-side workaround. The app header (`git_sha` + `git_ref` env vars) is still useful for in-app visibility but is no longer the only traceability path.
+So `apps list-deployments` is a self-documenting release ledger: you can see the deployed tag/branch and the exact commit it resolved to, with no app-side workaround.
+
+The app's UI badge reads from the **same source** — `server/src/routes/config.ts` calls `GET /api/2.0/apps/<app_name>` at runtime (cached 5 min per process) and reads `active_deployment.git_source.{tag,branch,commit,resolved_commit}`. That's why the running app's badge always reflects the actual deployed revision, and rollbacks update it on next page load. The `databricks.yml` `config.env` block (with `APP_VERSION` / `APP_GIT_REF` bundle vars) does **not** survive Git-backed deploys — the repo's `app.yaml` is the source of truth for runtime env, and our `app.yaml` doesn't declare those vars. The API-based read is the canonical path.
 
 ### Data-side rollback (Lakebase)
 
@@ -224,23 +226,23 @@ STAGING_APP=db-chatbot-staging
 PROD_APP=db-chatbot-prod
 ```
 
+> **Note:** the `--var="git_sha=…"` / `--var="git_ref=…"` overrides on `bundle deploy` are vestigial under Git-backed — the repo's `app.yaml` is the source of truth for the app's runtime env, and `databricks.yml`'s `config.env` block doesn't take effect. The version badge in the running app reads `git_source` from the Apps API instead. The bundle vars still set defaults that show up if you query `databricks bundle summary`, but they don't reach the running app.
+
 ### Release v1.2.0: tag → staging → prod
 
 ```bash
 git tag -a v1.2.0 -m "release notes"
 git push origin v1.2.0
 
-# Staging
-databricks bundle deploy -t staging \
-  --var="git_sha=$(git rev-parse HEAD)" --var="git_ref=v1.2.0"
+# Staging — bundle deploy applies resource shape, apps deploy rolls the code
+databricks bundle deploy -t staging
 databricks apps start "$STAGING_APP"     # no-op if already running
 databricks apps deploy "$STAGING_APP" --json '{"git_source":{"tag":"v1.2.0"}}'
 
 # Smoke test against staging URL — open the app, send a message, check the version badge
 
 # Prod (manual approval gate = you typing this command after sign-off)
-databricks bundle deploy -t prod \
-  --var="git_sha=$(git rev-parse HEAD)" --var="git_ref=v1.2.0"
+databricks bundle deploy -t prod
 databricks apps start "$PROD_APP"
 databricks apps deploy "$PROD_APP" --json '{"git_source":{"tag":"v1.2.0"}}'
 ```
@@ -248,10 +250,9 @@ databricks apps deploy "$PROD_APP" --json '{"git_source":{"tag":"v1.2.0"}}'
 ### Rollback prod to v1.1.5 (the most recent good tag)
 
 ```bash
-# Bundle deploy is unchanged for code-only rollback, but run it for symmetry
-# in case the resource shape from the bad tag was different
-databricks bundle deploy -t prod \
-  --var="git_sha=$(git rev-parse v1.1.5)" --var="git_ref=v1.1.5"
+# Bundle deploy is a no-op for code-only rollback (resource shape unchanged),
+# but run it for symmetry in case the resource shape from the bad tag was different
+databricks bundle deploy -t prod
 
 databricks apps start "$PROD_APP"
 databricks apps deploy "$PROD_APP" --json '{"git_source":{"tag":"v1.1.5"}}'
@@ -268,8 +269,7 @@ The new deployment row will show `tag=v1.1.5` with the resolved_commit matching 
 ```bash
 git push origin main           # or whatever branch you're working on
 SHA=$(git rev-parse HEAD)
-databricks bundle deploy -t dev --var="resource_name_suffix=dev-<suffix>" \
-  --var="git_sha=$SHA" --var="git_ref=$(git rev-parse --abbrev-ref HEAD)"
+databricks bundle deploy -t dev --var="resource_name_suffix=dev-<suffix>"
 databricks apps start "$DEV_APP"
 databricks apps deploy "$DEV_APP" --json "{\"git_source\":{\"commit\":\"$SHA\"}}"
 ```

@@ -56,10 +56,7 @@ jobs:
         run: databricks bundle validate -t staging
 
       - name: Deploy bundle (resources only — Git-backed source)
-        run: |
-          databricks bundle deploy -t staging \
-            --var="git_sha=${{ steps.git.outputs.sha }}" \
-            --var="git_ref=${{ steps.git.outputs.ref }}"
+        run: databricks bundle deploy -t staging
 
       # `apps deploy` requires the app's compute to be RUNNING. First-time
       # deploys after `bundle deploy` come up STOPPED — `apps start` is
@@ -114,10 +111,7 @@ jobs:
         run: databricks bundle validate -t prod
 
       - name: Deploy bundle (resources only — Git-backed source)
-        run: |
-          databricks bundle deploy -t prod \
-            --var="git_sha=${{ steps.git.outputs.sha }}" \
-            --var="git_ref=${{ steps.git.outputs.ref }}"
+        run: databricks bundle deploy -t prod
 
       - name: Ensure prod compute is running
         run: databricks apps start db-chatbot-prod

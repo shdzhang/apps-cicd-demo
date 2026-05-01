@@ -32,12 +32,6 @@ variables:
   app_git_ref:
     description: "Git ref to deploy as the default for `bundle deploy`. CI overrides via `apps deploy --json` per-run."
     default: main
-  git_sha:
-    description: "Git SHA of the build — surfaced in app header for human-readable traceability"
-    default: local-dev
-  git_ref:
-    description: "Git ref (branch or tag) of the build — surfaced in app header"
-    default: local
 
 resources:
   database_instances:
@@ -81,13 +75,10 @@ resources:
             instance_name: ${resources.database_instances.chatbot_lakebase.name}
             permission: CAN_CONNECT_AND_CREATE
 
-      config:
-        env:
-          - name: APP_VERSION
-            value: ${var.git_sha}
-          - name: APP_GIT_REF
-            value: ${var.git_ref}
-
+      # Note: `config.env` doesn't take effect on Git-backed deploys —
+      # the repo's `app.yaml` is the source of truth for runtime env. Set
+      # any APP_* env vars there instead. The version badge in the app
+      # reads `git_source` from the Apps API at runtime, not from env vars.
       permissions:
         - group_name: ${var.app_users_group}
           level: CAN_USE
