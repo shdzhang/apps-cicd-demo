@@ -14,8 +14,10 @@ on:
         description: "Tag or commit SHA to release"
         required: true
 
+# Static group (not per-tag) so two simultaneous releases don't both hit
+# staging in parallel — they share the same `/Workspace/.../staging` path.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-pipeline
   cancel-in-progress: false
 
 jobs:
@@ -42,14 +44,22 @@ jobs:
       - run: npm ci
       - run: npm run build:client && npm run build:server
 
+      # `github.sha` is set at workflow-trigger time and points at main on
+      # workflow_dispatch — capture the actual checked-out ref instead.
+      - name: Capture deployed git ref
+        id: git
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.inputs.ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Validate bundle (staging)
         run: databricks bundle validate -t staging
 
       - name: Deploy to staging
         run: |
           databricks bundle deploy -t staging \
-            --var="git_sha=${{ github.sha }}" \
-            --var="git_ref=${{ github.ref_name }}"
+            --var="git_sha=${{ steps.git.outputs.sha }}" \
+            --var="git_ref=${{ steps.git.outputs.ref }}"
 
       - name: Start staging app
         run: databricks bundle run databricks_chatbot -t staging
@@ -58,6 +68,11 @@ jobs:
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment: prod  # Configure required reviewers in repo Settings → Environments
+    # Job-level mutex shared with rollback.yml so a release and a rollback
+    # cannot deploy to prod concurrently, even though they're separate workflows.
+    concurrency:
+      group: prod-deploy
+      cancel-in-progress: false
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
@@ -78,14 +93,20 @@ jobs:
       - run: npm ci
       - run: npm run build:client && npm run build:server
 
+      - name: Capture deployed git ref
+        id: git
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.inputs.ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Validate bundle (prod)
         run: databricks bundle validate -t prod
 
       - name: Deploy to prod
         run: |
           databricks bundle deploy -t prod \
-            --var="git_sha=${{ github.sha }}" \
-            --var="git_ref=${{ github.ref_name }}"
+            --var="git_sha=${{ steps.git.outputs.sha }}" \
+            --var="git_ref=${{ steps.git.outputs.ref }}"
 
       - name: Start prod app
         run: databricks bundle run databricks_chatbot -t prod

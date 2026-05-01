@@ -14,14 +14,14 @@ on:
         description: "Why are you rolling back? (audit trail)"
         required: true
 
-concurrency:
-  group: release-prod
-  cancel-in-progress: false
-
 jobs:
   rollback:
     runs-on: ubuntu-latest
     environment: prod  # Same approval gate as release.yml
+    # Shared mutex with release.yml's deploy-prod job — see comment there.
+    concurrency:
+      group: prod-deploy
+      cancel-in-progress: false
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
@@ -46,6 +46,12 @@ jobs:
       - run: npm ci
       - run: npm run build:client && npm run build:server
 
+      # Use the SHA of the rolled-back tag, not the workflow trigger's SHA
+      # (which would be main at dispatch time).
+      - name: Capture deployed git ref
+        id: git
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Show prior deployment history (before rollback)
         run: databricks apps list-deployments db-chatbot-prod --output json | head -80
 
@@ -55,7 +61,7 @@ jobs:
       - name: Re-deploy older revision
         run: |
           databricks bundle deploy -t prod \
-            --var="git_sha=${{ github.sha }}" \
+            --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ github.event.inputs.ref }}"
 
       - name: Start app

@@ -63,6 +63,8 @@ Key line: *"This is the gate. In a regulated bank you have one or more named app
 
 This is the moment they're most curious about. Be deliberate.
 
+**Frame it first:** there is no native one-click rollback in Databricks Apps today (confirmed by Apps engineering — not on the roadmap). Databricks officially recommends what we're about to demo: a `workflow_dispatch` that re-deploys a previous Git tag through the same pipeline. This is the *primary* rollback mechanism, not a break-glass exception.
+
 - Repo → Actions → "Rollback prod" → "Run workflow"
 - `ref` = `v0.1.0` (the older tag we pre-staged)
 - `reason` = "demo rollback"
@@ -70,34 +72,39 @@ This is the moment they're most curious about. Be deliberate.
 
 Walk the workflow:
 
-- Same `bundle deploy + run` against prod
-- Just with `git checkout` of the older revision
+- `git checkout v0.1.0`, then `bundle deploy + bundle run` against prod
+- The deployment_id in `apps list-deployments` is a server-generated 32-char hex string — opaque, not human-readable. The traceable identity is the **Git tag + the `git_sha` env var the app exposes in its header**. Pair them with the audit log (`service_name = 'apps'`, `action_name = 'deployApp'` — verified live; rename-defensive wording in the README) if you need to map a deployment_id back to a tag.
 - Lakebase data is preserved — only the app code rolls back
 
 Refresh the app — header now shows `v0.1.0` and the older SHA. Chat history is still there.
 
 Key line: *"There's no native rollback button in Databricks. Rollback in this model = re-deploy a known-good tag through the same pipeline. Same path, same audit, same approvals — that's the feature."*
 
+**Then add the data-side beat (the bit DBAs care about):** *"Code rollback is the easy half. The hard half is data — once a migration runs, redeploying old app code does NOT undo it. The pattern is: take a Lakebase branch right before any risky migration. Lakebase branching is copy-on-write, so the snapshot is instant regardless of DB size. If the migration is bad, you restore from the branch with a single API call. Keep the branch 48–72h, then drop it. That's the regulated-environment story end to end — code via Git tag, data via Lakebase branch."*
+
+**Trunk hygiene follow-up (mention briefly):** *"Once prod is back on `v0.1.0`, `main` still points at the bad commit. Open a revert PR on `main` and let it flow through dev → staging → prod normally. Now `main` HEAD = what's running. Standard trunk-based hygiene — but it's a follow-up, not the rollback itself."*
+
 ### 6. Show deployment history + audit (3 min)
 
 Terminal:
 
 ```bash
-databricks apps list-deployments db-chatbot-prod --output json | jq '.deployments[0:5] | .[] | {id, status, deployer, source_code_path}'
+databricks apps list-deployments db-chatbot-prod --output json \
+  | jq '.[0:5] | .[] | {deployment_id, status, creator, create_time, source_code_path}'
 ```
 
-Three deployments visible: original v1.2.0, the rollback, plus whatever was there before. Each is independently accessible.
+Three deployments visible — IDs are server-generated 32-char hex strings (opaque). Map them back to releases via `create_time` + the audit log + the `git_sha` the running app exposes in its header.
 
 Then in a SQL editor:
 
 ```sql
-SELECT event_date, user_identity.email, action_name, request_params.request_object_id
+SELECT event_time, user_identity.email, action_name, request_params
 FROM system.access.audit
-WHERE action_name LIKE '%AppDeployment%' OR action_name LIKE 'changeAppsAcl'
-ORDER BY event_date DESC LIMIT 20
+WHERE service_name = 'apps'
+ORDER BY event_time DESC LIMIT 20
 ```
 
-Point out the rollback row, the approver email if they want to chase that.
+Point out the deploy/rollback rows and the approver/deployer emails.
 
 ### 7. OBO recap (3 min)
 
@@ -112,10 +119,11 @@ Don't go deeper unless they ask — auth is its own segment.
 ## Common questions to expect
 
 - **Q: Where do build artefacts live?** A: There's no build artefact for an app — `bundle deploy` uploads source to Workspace files. The "version" *is* the Git SHA the bundle was deployed from.
-- **Q: Can I roll back without rebuilding?** A: Practically, just `git checkout <tag> && bundle deploy` is fast (~1 min for code-only change, no Lakebase reprovision).
+- **Q: Can I roll back without rebuilding?** A: Yes — that's exactly what the rollback workflow does, with the prod approval gate and audit trail attached. The underlying mechanic is `git checkout <tag> && bundle deploy + bundle run` (~1 min for code-only change, no Lakebase reprovision); going through the workflow keeps the gate and trail intact.
 - **Q: What about secrets?** A: Use Databricks Secrets, referenced by `valueFrom: secret/<scope>/<key>` in `app.yaml`. Don't put secrets in `databricks.yml` variables.
 - **Q: Azure DevOps instead of GitHub Actions?** A: Same shape — `databricks` CLI runs identically. The OAuth M2M flow is identical. Service connections replace GitHub secrets.
 - **Q: How do I do canary or blue/green?** A: Two apps in the bundle (`databricks_chatbot_canary` + `databricks_chatbot_main`), Front-Door / App Gateway in front splitting traffic. Native traffic-split inside Apps is on the roadmap.
+- **Q: A release is paused on prod approval and I need to push a hotfix tag — what happens?** A: The hotfix workflow run is *queued* behind the in-flight release (workflow-level `release-pipeline` concurrency lock). To unblock: either approve the in-flight prod deploy and let the hotfix release behind it, or cancel the in-flight workflow run from the Actions UI. Same lock prevents two simultaneous tag pushes from racing each other through staging.
 
 ## What NOT to demo (out of scope for this slot)
 

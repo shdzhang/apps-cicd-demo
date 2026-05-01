@@ -116,6 +116,35 @@ The first deploy provisions a Lakebase instance — give it 5–10 minutes.
 
 The running app shows the live build in the header (`v1.2.0` and the short SHA). Roll back, refresh — header updates instantly.
 
+> **Heads up — concurrency:** `release.yml` and `rollback.yml` share a `prod-deploy` lock so the two can never deploy to prod at the same time. `release.yml` additionally serializes the whole pipeline under `release-pipeline`. Practical effect: if a release is paused on prod approval and you push a hotfix tag, the hotfix run is **queued** behind the in-flight one. To unblock, either approve the pending prod deploy or cancel the in-flight workflow run from the Actions UI.
+
+## Rollback strategy
+
+There is no native one-click rollback in Databricks Apps — both rollback paths re-deploy older code through the same pipeline. This repo implements both:
+
+| Path | When to use | Mechanism |
+|---|---|---|
+| **`workflow_dispatch` re-deploy** (primary) | Any rollback, urgent or planned | `rollback.yml` checks out the target tag, runs `bundle deploy + bundle run` against prod |
+| **Revert PR on `main`** (follow-up) | Trunk hygiene after a rollback | Open a "Revert <bad PR>" PR; flows through dev → staging → prod normally so `main` HEAD = what's running |
+
+**Why `workflow_dispatch` is primary** (and not just break-glass): it's what [Databricks officially recommends](https://docs.databricks.com/aws/en/dev-tools/ci-cd/best-practices), it preserves the prod approval gate, and it's faster than waiting for a revert PR to traverse the full pipeline. The revert PR is the *trunk-hygiene step*, not the rollback itself.
+
+**Traceability:** `databricks apps list-deployments` returns server-generated 32-char hex deployment IDs (e.g. `01f1453256c510d39e9d369944ae2073`) — opaque and not human-readable. Map deployments to releases via:
+
+1. **App header** — the running app shows its `git_sha` + `git_ref` (injected as env vars by the workflows). Most user-visible.
+2. **Audit log** — `system.access.audit` rows where `service_name = 'apps'` show who, when, and which workspace path was deployed (deploy/permission action_names appear there — verify exact names in your workspace).
+3. **Git tags** — every prod release is tagged; the tag is the human-readable name. Pair tag + deployment `create_time` from the audit log to identify a deployment_id.
+
+### Data-side rollback (Lakebase)
+
+App rollback covers code only. A schema migration applied by the bad release is **not** undone by re-deploying old code. For destructive changes:
+
+1. **Before the migration:** create a Lakebase branch (instant copy-on-write — see [Lakebase branching](https://www.databricks.com/blog/database-branching-postgres-git-style-workflows-databricks-lakebase))
+2. **If rollback needed:** restore from the branch (single API call)
+3. **If successful:** keep the branch 48–72h as a safety net, then drop
+
+Always write **forward-compatible migrations** (add nullable column → dual-write → drop old column in a separate release) so a code rollback never requires a schema rollback.
+
 ## Local development
 
 ```bash
@@ -126,21 +155,25 @@ npm run dev                # client on 3000, server on 3001
 
 To run against a local Lakebase mirror, see `UPSTREAM_README.md` (preserved from the upstream template) — covers `quickstart.sh`, `migrate.ts`, etc.
 
-## Useful CLI commands during the demo
+## Useful commands during the demo
 
 ```bash
 # History of every deployment, newest first
-databricks apps list-deployments db-chatbot-prod --output json | jq '.deployments[0:5]'
+databricks apps list-deployments db-chatbot-prod --output json \
+  | jq '.[0:5] | .[] | {deployment_id, status, creator, create_time, source_code_path}'
 
 # What's running right now
 databricks apps get db-chatbot-prod
+```
 
-# Audit-log who changed app permissions
-databricks sql execute --warehouse <wh> --query "
-  SELECT event_date, user_identity.email, action_name, request_params.request_object_id
-  FROM system.access.audit
-  WHERE action_name LIKE 'changeAppsAcl' OR action_name LIKE '%AppDeployment%'
-  ORDER BY event_date DESC LIMIT 20"
+Audit-log who deployed / changed permissions on apps (run in a SQL editor against
+the workspace, or via the Statement Execution API):
+
+```sql
+SELECT event_time, user_identity.email, action_name, request_params
+FROM system.access.audit
+WHERE service_name = 'apps'
+ORDER BY event_time DESC LIMIT 20
 ```
 
 ## A note on Lakebase Autoscaling

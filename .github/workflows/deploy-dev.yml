@@ -38,6 +38,16 @@ jobs:
       - name: Build client + server
         run: npm run build:client && npm run build:server
 
+      # Mirrors release.yml / rollback.yml — capture the actual checked-out
+      # SHA so all three workflows surface the deployed ref the same way.
+      # Equivalent to `github.sha` for this workflow since there's no
+      # `inputs.ref`, but kept for symmetry.
+      - name: Capture deployed git ref
+        id: git
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Validate bundle
         run: databricks bundle validate -t dev
 
@@ -45,8 +55,8 @@ jobs:
         run: |
           databricks bundle deploy -t dev \
             --var="resource_name_suffix=dev" \
-            --var="git_sha=${{ github.sha }}" \
-            --var="git_ref=${{ github.ref_name }}"
+            --var="git_sha=${{ steps.git.outputs.sha }}" \
+            --var="git_ref=${{ steps.git.outputs.ref }}"
 
       - name: Start app
         run: databricks bundle run databricks_chatbot -t dev
