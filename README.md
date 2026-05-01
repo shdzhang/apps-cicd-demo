@@ -1,6 +1,8 @@
-# Databricks Apps — CI/CD demo
+# Databricks Apps — CI/CD demo (Git-backed variant)
 
 End-to-end CI/CD reference for a Databricks Apps chatbot that uses **on-behalf-of-user (OBO) authorization**, an **Agent Bricks / Foundation Model serving endpoint**, and **Lakebase** for persistent chat history. Forked and customised from `databricks/app-templates/e2e-chatbot-app-next`.
+
+This branch (`git-backed`) uses [Git-backed app deployment](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy#deploy-from-a-git-repository) (GA 2026-04-21) — the platform pulls source from Git, no workspace-file upload of source code. Compare with `main`, which uploads source via `bundle deploy`.
 
 The point of this repo is the **pipeline shape**, not the chat app itself. Use it as a template platform teams can copy and adapt to their own apps.
 
@@ -10,14 +12,15 @@ The point of this repo is the **pipeline shape**, not the chat app itself. Use i
 
 | Capability | How |
 |---|---|
+| **Git-backed source** | `git_repository` + `git_source` in `databricks.yml`; CI overrides ref per-run via `apps deploy --json '{"git_source":{...}}'` |
 | **OBO** | `user_api_scopes` in `databricks.yml` lets the app call the agent endpoint and Lakebase as the signed-in user — UC permissions enforced |
 | **Agent Bricks** | App calls a `serving_endpoint` (default `databricks-claude-sonnet-4` — swap for a custom Agent Bricks endpoint) |
 | **Lakebase** | Managed Postgres provisioned by the bundle; chat history persists across deployments and rollbacks. (See [Lakebase Autoscaling note](#a-note-on-lakebase-autoscaling) below.) |
 | **DABs lifecycle** | One `databricks.yml`, three targets (`dev` / `staging` / `prod`), parameterised by suffix |
-| **Versioning** | Git SHA + ref injected as env vars, surfaced in the app header |
+| **Versioning** | Deployment record carries `git_source.tag/branch/commit` + `resolved_commit` natively; app header still surfaces `git_sha` for in-app visibility |
 | **CI gates** | PR validation, automatic dev deploy, tag-driven staging→prod release with approval |
 | **Rollback** | `workflow_dispatch` action that re-deploys an older Git tag through the same pipeline |
-| **Audit** | `databricks apps list-deployments` after each pipeline step; `system.access.audit` for sharing/permission events |
+| **Audit** | `apps list-deployments` shows tag/branch + resolved commit per deployment; `system.access.audit` for sharing/permission events |
 
 ## Pipeline overview
 
@@ -94,13 +97,35 @@ The workflows reference `secrets.DATABRICKS_CLIENT_ID` and pair it with `environ
 
 Still in repo Settings → Environments, on the `prod` environment add **required reviewers** so the prod deploy step pauses for human approval. `dev` and `staging` should have no protection rules — they need to deploy unattended.
 
-### 5. First-time bundle init
+### 5. Configure Git credentials on each app's service principal
+
+Git-backed app deploy requires the **app's auto-created service principal** to have a Git credential — the user-level Git credential in User Settings doesn't transfer. For private repos this is mandatory; public repos skip this step.
+
+```bash
+# After the first `bundle deploy -t <target>`, find the app's SP id
+databricks apps get db-chatbot-<suffix> --output json | jq '.service_principal_id'
+
+# Generate a fine-grained GitHub PAT scoped to this repo with Contents: Read-only
+# (https://github.com/settings/personal-access-tokens/new). Then attach it:
+databricks git-credentials create gitHub \
+  --principal-id <SP_ID> \
+  --git-username <YOUR_GH_USERNAME> \
+  --git-email <YOUR_EMAIL> \
+  --personal-access-token '<PAT>' \
+  --name "apps-cicd-demo SP creds"
+```
+
+Each target's app has its own SP — repeat once per target after its first `bundle deploy`. The CLI accepts only one credential per provider per SP, so use `update <id> gitHub` (not `create`) to rotate the PAT later.
+
+### 6. First-time bundle init
 
 ```bash
 npm ci
 databricks bundle validate -t dev
-databricks bundle deploy -t dev          # provisions Lakebase + creates app
-databricks bundle run databricks_chatbot -t dev
+databricks bundle deploy -t dev          # provisions Lakebase + creates app + sets git_repository
+# Now do step 5 (configure SP creds) — needed before first apps deploy
+databricks apps deploy db-chatbot-dev-<suffix> \
+  --json '{"git_source":{"branch":"main"}}'
 ```
 
 The first deploy provisions a Lakebase instance — give it 5–10 minutes.
@@ -129,11 +154,17 @@ There is no native one-click rollback in Databricks Apps — both rollback paths
 
 **Why `workflow_dispatch` is primary** (and not just break-glass): it's what [Databricks officially recommends](https://docs.databricks.com/aws/en/dev-tools/ci-cd/best-practices), it preserves the prod approval gate, and it's faster than waiting for a revert PR to traverse the full pipeline. The revert PR is the *trunk-hygiene step*, not the rollback itself.
 
-**Traceability:** `databricks apps list-deployments` returns server-generated 32-char hex deployment IDs (e.g. `01f1453256c510d39e9d369944ae2073`) — opaque and not human-readable. Map deployments to releases via:
+**Traceability:** With Git-backed deploy, the deployment record itself carries the Git ref. `databricks apps list-deployments` returns rows where each `git_source` looks like:
 
-1. **App header** — the running app shows its `git_sha` + `git_ref` (injected as env vars by the workflows). Most user-visible.
-2. **Audit log** — `system.access.audit` rows where `service_name = 'apps'` show who, when, and which workspace path was deployed (deploy/permission action_names appear there — verify exact names in your workspace).
-3. **Git tags** — every prod release is tagged; the tag is the human-readable name. Pair tag + deployment `create_time` from the audit log to identify a deployment_id.
+```json
+{
+  "tag": "v1.2.0",
+  "git_repository": {"provider": "gitHub", "url": "https://github.com/<org>/<repo>"},
+  "resolved_commit": "16b96f5d9ac5e738ef7caf22c4a4d29430e96cfa"
+}
+```
+
+So `apps list-deployments` is a self-documenting release ledger: you can see the deployed tag/branch and the exact commit it resolved to, with no app-side workaround. The app header (`git_sha` + `git_ref` env vars) is still useful for in-app visibility but is no longer the only traceability path.
 
 ### Data-side rollback (Lakebase)
 
@@ -158,9 +189,15 @@ To run against a local Lakebase mirror, see `UPSTREAM_README.md` (preserved from
 ## Useful commands during the demo
 
 ```bash
-# History of every deployment, newest first
+# Release ledger — newest deployments with the Git ref each came from
 databricks apps list-deployments db-chatbot-prod --output json \
-  | jq '.[0:5] | .[] | {deployment_id, status, creator, create_time, source_code_path}'
+  | jq '.[0:5] | .[] | {
+      deployment_id,
+      state: .status.state,
+      tag: .git_source.tag, branch: .git_source.branch,
+      resolved_commit: .git_source.resolved_commit,
+      create_time, creator
+    }'
 
 # What's running right now
 databricks apps get db-chatbot-prod

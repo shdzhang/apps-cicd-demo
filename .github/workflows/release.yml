@@ -55,14 +55,19 @@ jobs:
       - name: Validate bundle (staging)
         run: databricks bundle validate -t staging
 
-      - name: Deploy to staging
+      - name: Deploy bundle (resources only — Git-backed source)
         run: |
           databricks bundle deploy -t staging \
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
 
-      - name: Start staging app
-        run: databricks bundle run databricks_chatbot -t staging
+      # Git-backed: deploy the tag directly. `apps list-deployments` will show
+      # the tag/commit on the deployment record, so the lineage is auditable
+      # without our app-header workaround.
+      - name: Deploy app from Git (tag)
+        run: |
+          databricks apps deploy db-chatbot-staging \
+            --json "$(printf '{"git_source":{"tag":"%s"}}' "${{ steps.git.outputs.ref }}")"
 
   deploy-prod:
     needs: deploy-staging
@@ -102,14 +107,16 @@ jobs:
       - name: Validate bundle (prod)
         run: databricks bundle validate -t prod
 
-      - name: Deploy to prod
+      - name: Deploy bundle (resources only — Git-backed source)
         run: |
           databricks bundle deploy -t prod \
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
 
-      - name: Start prod app
-        run: databricks bundle run databricks_chatbot -t prod
+      - name: Deploy app from Git (tag)
+        run: |
+          databricks apps deploy db-chatbot-prod \
+            --json "$(printf '{"git_source":{"tag":"%s"}}' "${{ steps.git.outputs.ref }}")"
 
       - name: Show deployment history
         run: databricks apps list-deployments db-chatbot-prod --output json | head -100

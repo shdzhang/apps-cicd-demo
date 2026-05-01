@@ -4,6 +4,10 @@ bundle:
 # CI/CD reference for an agentic chat app on Databricks Apps:
 # OBO authorization + Agent Bricks (or Foundation Model) + Lakebase chat history.
 #
+# Source delivery: Git-backed deployments (GA 2026-04-21). The app pulls source
+# directly from the Git repo at `git_repository.url`; CI overrides `app_git_ref`
+# per-run to deploy a specific tag/branch/commit.
+#
 # Targets dev / staging / prod share one workspace in this demo (separated by
 # resource_name_suffix). In production, point each target at its own workspace.
 
@@ -22,11 +26,17 @@ variables:
   app_admins_group:
     description: "Account group granted CAN_MANAGE on the app"
     default: admins
+  app_git_repository_url:
+    description: "Git repository URL for app source (Git-backed deploy)"
+    default: https://github.com/shdzhang/apps-cicd-demo
+  app_git_ref:
+    description: "Git ref to deploy as the default for `bundle deploy`. CI overrides via `apps deploy --json` per-run."
+    default: main
   git_sha:
-    description: "Git SHA of the build (injected by CI for traceability)"
+    description: "Git SHA of the build — surfaced in app header for human-readable traceability"
     default: local-dev
   git_ref:
-    description: "Git ref (branch or tag) of the build"
+    description: "Git ref (branch or tag) of the build — surfaced in app header"
     default: local
 
 resources:
@@ -39,7 +49,16 @@ resources:
     databricks_chatbot:
       name: db-chatbot-${var.resource_name_suffix}
       description: "Agentic chat app — OBO + Agent Bricks + Lakebase"
-      source_code_path: .
+
+      # Git-backed deployment — the app fetches source directly from this repo
+      # at the ref specified below. `bundle deploy` applies resource shape;
+      # `apps deploy --json '{"git_source":{...}}'` in CI overrides the ref
+      # per-release.
+      git_repository:
+        provider: gitHub
+        url: ${var.app_git_repository_url}
+      git_source:
+        branch: ${var.app_git_ref}
 
       # OBO scopes — the agent and Lakebase calls run under the user's identity.
       # `serving.serving-endpoints` lets the app call the agent endpoint as the user.

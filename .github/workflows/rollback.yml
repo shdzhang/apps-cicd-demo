@@ -58,14 +58,19 @@ jobs:
       - name: Validate bundle
         run: databricks bundle validate -t prod
 
-      - name: Re-deploy older revision
+      - name: Deploy bundle (resources only — Git-backed source)
         run: |
           databricks bundle deploy -t prod \
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ github.event.inputs.ref }}"
 
-      - name: Start app
-        run: databricks bundle run databricks_chatbot -t prod
+      # Rollback = deploy an older Git tag through the same pipeline.
+      # `apps list-deployments` will show the deployed tag, so the rollback
+      # event is auditable as "deployed v0.1.0 at <time>".
+      - name: Deploy app from Git (rollback tag)
+        run: |
+          databricks apps deploy db-chatbot-prod \
+            --json "$(printf '{"git_source":{"tag":"%s"}}' "${{ github.event.inputs.ref }}")"
 
       - name: Show deployment history (after rollback)
         run: databricks apps list-deployments db-chatbot-prod --output json | head -80

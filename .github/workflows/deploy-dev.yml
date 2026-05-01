@@ -51,12 +51,17 @@ jobs:
       - name: Validate bundle
         run: databricks bundle validate -t dev
 
-      - name: Deploy bundle
+      - name: Deploy bundle (resources only — Git-backed source)
         run: |
           databricks bundle deploy -t dev \
             --var="resource_name_suffix=dev" \
             --var="git_sha=${{ steps.git.outputs.sha }}" \
             --var="git_ref=${{ steps.git.outputs.ref }}"
 
-      - name: Start app
-        run: databricks bundle run databricks_chatbot -t dev
+      # Git-backed: the platform pulls source from the configured Git repo at
+      # the commit we just merged. `--json` overrides the default branch ref
+      # in databricks.yml so each push deploys exactly that commit.
+      - name: Deploy app from Git (commit = HEAD)
+        run: |
+          databricks apps deploy db-chatbot-dev \
+            --json "$(printf '{"git_source":{"commit":"%s"}}' "${{ steps.git.outputs.sha }}")"

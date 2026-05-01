@@ -1,16 +1,19 @@
-# Talk track — CI/CD demo segment (≈25 min)
+# Talk track — CI/CD demo segment (≈25 min) — Git-backed variant
 
 Internal-only. Sequence and what to say at each step. The 90-min agenda from the engagement doc puts this between minute 50 and 75.
+
+This branch demos the **Git-backed app deploy flow** that went GA on 2026-04-21. Compared with `main` (workspace-file upload), this is the version Databricks now recommends — Git is the source of truth, every deployment record carries the deployed commit natively, and there's a workspace-level admin policy ("Only allow app deployments from Git") that maps cleanly onto regulatory change-management requirements.
 
 ## Set-up before the call
 
 - [ ] Workspace logged in via `databricks auth login --profile demo`
-- [ ] Three service principals created and named (`apps-cicd-dev/staging/prod`); OAuth secrets generated and stored in GitHub repo secrets
+- [ ] Three service principals (`apps-cicd-dev/staging/prod`) created; OAuth secrets in GitHub repo Environments
+- [ ] **App SP Git credentials configured** — for each target's app SP, attach a fine-grained GitHub PAT (Contents:Read on the repo) via `databricks git-credentials create gitHub --principal-id <app_sp_id> ...`. Without this the platform can't clone the repo at deploy time.
 - [ ] First `bundle deploy -t dev` already done so the Lakebase instance is warm (cold provision is 5–10 min — don't do it live)
 - [ ] An older tag (`v0.1.0`) already deployed to prod, so we have something to roll back from
 - [ ] Two browser tabs open: the GitHub Actions page and the deployed app URL
-- [ ] Terminal pre-loaded with `databricks apps list-deployments db-chatbot-prod`
-- [ ] App header version badge visible — confirm the SHA matches the current prod tag
+- [ ] Terminal pre-loaded with the `apps list-deployments` jq incantation from the README — the one that surfaces `git_source.tag/branch` + `resolved_commit`
+- [ ] App header version badge visible — confirm it matches the current prod tag
 
 ## Flow
 
@@ -18,12 +21,14 @@ Internal-only. Sequence and what to say at each step. The 90-min agenda from the
 
 Pull up the file. Highlight:
 
-- One file describes everything — app, Lakebase instance, serving endpoint binding, permissions, OBO scopes, env vars
+- One file describes everything — app, Lakebase instance, serving endpoint binding, permissions, OBO scopes
 - `targets:` shows dev / staging / prod — same shape, different suffix
-- `user_api_scopes:` is what enables OBO. Each scope is the *minimum permission grant needed for the user’s token to be useful downstream*.
-- `git_sha` and `git_ref` are bundle variables — the CI overrides them with `--var=` so the running app advertises what build is live
+- `user_api_scopes:` is what enables OBO. Each scope is the *minimum permission grant needed for the user's token to be useful downstream*.
+- `git_repository` + `git_source` — the platform pulls source directly from this Git repo at the ref specified. No workspace-file upload of source code.
 
-Key line to deliver: *"There's nothing here that says 'CI/CD'. The bundle is just configuration. Whatever runs `databricks bundle deploy` IS the CI/CD."*
+Key line to deliver: *"There's nothing here that says 'CI/CD'. The bundle is just configuration — including the Git repo it points at. Whatever runs `databricks bundle deploy` to apply this config + `databricks apps deploy` to roll a Git ref IS the CI/CD."*
+
+If they ask about the admin enforcement: *"There's a workspace-level setting — Settings → Development → Apps → 'Only allow app deployments from Git' — that turns this on for every app in the workspace. For a regulated environment, that's the policy enforcement: every prod deploy is a reviewable Git ref."*
 
 ### 2. Open a PR — show validate (3 min)
 
@@ -37,11 +42,10 @@ Open an existing PR (or branch + push live). Click into Actions. Walk through:
 
 Merge the PR. Switch to Actions → `Deploy to Dev`. While it runs:
 
-- `bundle deploy -t dev` — uploads source, applies terraform-managed resources (app, Lakebase, permissions, scopes)
-- `bundle run` — creates a new App **deployment**; that's the unit Databricks tracks
-- Each `bundle run` produces a `deployment_id` you can list with `apps list-deployments`
+- `bundle deploy -t dev` — applies terraform-managed resources (app config, Lakebase, permissions, scopes, `git_repository` association). No source upload — the app's `source_code_path` field is gone, replaced by `git_source`.
+- `apps deploy <app> --json '{"git_source":{"commit":"<sha>"}}'` — the platform clones the repo (via the SP's Git credential) at that exact commit and rolls out a deployment.
 
-Refresh the app — version badge in header should now be the new SHA.
+Refresh the app — version badge updates to the new SHA. Open the deployment list in the terminal: `git_source.resolved_commit` shows the deployed commit on the deployment record itself.
 
 ### 4. Cut a release — staging then prod (5 min)
 
@@ -72,9 +76,9 @@ This is the moment they're most curious about. Be deliberate.
 
 Walk the workflow:
 
-- `git checkout v0.1.0`, then `bundle deploy + bundle run` against prod
-- The deployment_id in `apps list-deployments` is a server-generated 32-char hex string — opaque, not human-readable. The traceable identity is the **Git tag + the `git_sha` env var the app exposes in its header**. Pair them with the audit log (`service_name = 'apps'`, `action_name = 'deployApp'` — verified live; rename-defensive wording in the README) if you need to map a deployment_id back to a tag.
-- Lakebase data is preserved — only the app code rolls back
+- `apps deploy db-chatbot-prod --json '{"git_source":{"tag":"v0.1.0"}}'` — that's it. No `git checkout`, no source upload. The platform clones the tag directly via the SP's Git credential. `bundle deploy` only re-asserts the resource shape (which is unchanged for a code rollback).
+- The new deployment record carries `git_source.tag = "v0.1.0"` and `resolved_commit` for that tag. `apps list-deployments` reads as a clean ledger — `tag/branch/commit` + `resolved_commit` are right there per row, no audit-log workaround needed.
+- Lakebase data is preserved — only the app code rolls back.
 
 Refresh the app — header now shows `v0.1.0` and the older SHA. Chat history is still there.
 
@@ -90,10 +94,16 @@ Terminal:
 
 ```bash
 databricks apps list-deployments db-chatbot-prod --output json \
-  | jq '.[0:5] | .[] | {deployment_id, status, creator, create_time, source_code_path}'
+  | jq '.[0:5] | .[] | {
+      deployment_id,
+      state: .status.state,
+      tag: .git_source.tag, branch: .git_source.branch,
+      resolved_commit: .git_source.resolved_commit,
+      create_time, creator
+    }'
 ```
 
-Three deployments visible — IDs are server-generated 32-char hex strings (opaque). Map them back to releases via `create_time` + the audit log + the `git_sha` the running app exposes in its header.
+Three deployments visible. Each row shows the deployed `tag/branch` + `resolved_commit`. Self-documenting release ledger — that's the feature Git-backed unlocks.
 
 Then in a SQL editor:
 
@@ -119,7 +129,7 @@ Don't go deeper unless they ask — auth is its own segment.
 ## Common questions to expect
 
 - **Q: Where do build artefacts live?** A: There's no build artefact for an app — `bundle deploy` uploads source to Workspace files. The "version" *is* the Git SHA the bundle was deployed from.
-- **Q: Can I roll back without rebuilding?** A: Yes — that's exactly what the rollback workflow does, with the prod approval gate and audit trail attached. The underlying mechanic is `git checkout <tag> && bundle deploy + bundle run` (~1 min for code-only change, no Lakebase reprovision); going through the workflow keeps the gate and trail intact.
+- **Q: Can I roll back without rebuilding?** A: Yes — that's exactly what the rollback workflow does, with the prod approval gate and audit trail attached. The underlying mechanic is one CLI call: `databricks apps deploy <app> --json '{"git_source":{"tag":"<old-tag>"}}'`. The platform clones that tag directly. ~1 min for code-only change, no Lakebase reprovision. Going through the workflow keeps the gate and trail intact.
 - **Q: What about secrets?** A: Use Databricks Secrets, referenced by `valueFrom: secret/<scope>/<key>` in `app.yaml`. Don't put secrets in `databricks.yml` variables.
 - **Q: Azure DevOps instead of GitHub Actions?** A: Same shape — `databricks` CLI runs identically. The OAuth M2M flow is identical. Service connections replace GitHub secrets.
 - **Q: How do I do canary or blue/green?** A: Two apps in the bundle (`databricks_chatbot_canary` + `databricks_chatbot_main`), Front-Door / App Gateway in front splitting traffic. Native traffic-split inside Apps is on the roadmap.
