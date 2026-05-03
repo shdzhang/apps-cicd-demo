@@ -19,6 +19,7 @@ The point of this repo is the **pipeline shape**, not the chat app itself. Use i
 | **DABs lifecycle** | One `databricks.yml`, three targets (`dev` / `staging` / `prod`), parameterised by suffix |
 | **Versioning** | Deployment record carries `git_source.tag/branch/commit` + `resolved_commit` natively; app header reads the active deployment from the Apps API at runtime (cached 5 min) and surfaces the tag prominently — see `server/src/routes/config.ts` |
 | **CI gates** | PR validation, automatic dev deploy, tag-driven staging→prod release with approval |
+| **Release automation** | Optional [release-please](https://github.com/googleapis/release-please-action) workflow opens a "Release vX.Y.Z" PR per merge to `main` based on Conventional Commits — merging the PR creates the tag, which fires `release.yml` |
 | **Rollback** | `workflow_dispatch` action that re-deploys an older Git tag through the same pipeline |
 | **Audit** | `apps list-deployments` shows tag/branch + resolved commit per deployment; `system.access.audit` for sharing/permission events |
 
@@ -47,16 +48,19 @@ The point of this repo is the **pipeline shape**, not the chat app itself. Use i
 ```
 .
 ├── .github/workflows/
-│   ├── validate.yml       # PR + non-main pushes — lint, typecheck, bundle validate
-│   ├── deploy-dev.yml     # main pushes — deploy + run @ dev
-│   ├── release.yml        # tag v* — staging → prod with approval gate
-│   └── rollback.yml       # workflow_dispatch — re-deploy older tag to prod
-├── databricks.yml         # DABs config, three targets, OBO scopes, Lakebase, version vars
-├── app.yaml               # App runtime entrypoint
-├── client/                # React + TS + Tailwind + Vercel AI SDK
-├── server/                # Express + AI SDK + Drizzle
-├── packages/              # Shared TS packages (core, auth, db, ai-sdk-providers)
-└── tests/                 # Playwright (unit / routes / e2e)
+│   ├── validate.yml         # PR + non-main pushes — lint, typecheck, bundle validate
+│   ├── deploy-dev.yml       # main pushes — bundle deploy + apps deploy @ dev
+│   ├── release.yml          # tag v* — staging → prod with approval gate
+│   ├── rollback.yml         # workflow_dispatch — re-deploy older tag to prod
+│   └── release-please.yml   # main pushes — auto-bump + open release PR (optional)
+├── release-please-config.json     # release-please bump rules + changelog sections
+├── .release-please-manifest.json  # current version (release-please updates this)
+├── databricks.yml           # DABs config, three targets, OBO scopes, Lakebase, git_repository
+├── app.yaml                 # App runtime entrypoint
+├── client/                  # React + TS + Tailwind + Vercel AI SDK
+├── server/                  # Express + AI SDK + Drizzle
+├── packages/                # Shared TS packages (core, auth, db, ai-sdk-providers)
+└── tests/                   # Playwright (unit / routes / e2e)
 ```
 
 ## One-time setup
@@ -155,13 +159,41 @@ If the workspace doesn't enforce IP ACLs, the default runners work as-is.
 | Action | What happens |
 |---|---|
 | Open a PR | `validate.yml` runs lint, typecheck, `bundle validate` for all three targets |
-| Merge to `main` | `deploy-dev.yml` runs `bundle deploy -t dev` + `apps deploy --json '{"git_source":{"commit":"<sha>"}}'` against dev |
-| `git tag v1.2.0 && git push --tags` | `release.yml` deploys staging, then prompts for approval, then deploys prod (both via `apps deploy --json '{"git_source":{"tag":"v1.2.0"}}'`) |
+| Merge to `main` (with Conventional Commit message) | `deploy-dev.yml` deploys to dev; `release-please.yml` opens / updates a "Release vX.Y.Z" PR with bumped version + changelog |
+| Merge the release PR | release-please creates the Git tag, which fires `release.yml` → deploys staging, prompts for approval, deploys prod |
 | Need to roll back | Repo → Actions → "Rollback prod" → enter the previous tag (e.g. `v1.1.5`) and reason |
 
 The running app shows the live build in the header (`v1.2.0` and the short SHA). Roll back, refresh — header updates instantly.
 
 > **Heads up — concurrency:** `release.yml` and `rollback.yml` share a `prod-deploy` lock so the two can never deploy to prod at the same time. `release.yml` additionally serializes the whole pipeline under `release-pipeline`. Practical effect: if a release is paused on prod approval and you push a hotfix tag, the hotfix run is **queued** behind the in-flight one. To unblock, either approve the pending prod deploy or cancel the in-flight workflow run from the Actions UI.
+
+## Release automation (optional — release-please)
+
+If you want auto-bumped versions + auto-generated changelogs instead of typing `git tag` by hand, this repo includes a [release-please](https://github.com/googleapis/release-please-action) workflow.
+
+**How it works:**
+
+1. Devs use [Conventional Commit](https://www.conventionalcommits.org/) prefixes when merging to `main`:
+   - `feat: add OBO scope for Genie` → minor bump (`v1.2.0` → `v1.3.0`)
+   - `fix: handle empty chat history` → patch bump (`v1.2.0` → `v1.2.1`)
+   - `feat!:` or `BREAKING CHANGE:` in the body → major bump (`v1.2.0` → `v2.0.0`)
+   - `docs:` / `chore:` / `refactor:` → no bump (still appears in changelog)
+2. release-please watches `main`. On each push it opens (or updates) a single "Release vX.Y.Z" PR with the bumped version, an auto-generated `CHANGELOG.md` entry, and the manifest update.
+3. **Merging the release PR** is the human gate. Doing so creates the Git tag (`v1.2.0`), publishes a GitHub Release with the changelog, and fires `release.yml` exactly the same as a manual `git tag` would.
+
+**Why this matters for regulated environments:**
+
+- Every release is a reviewable PR — required-reviewers / CODEOWNERS apply normally
+- Version + changelog are derived from commit history, not hand-typed (no typos, no missed entries)
+- Tag creation is gated by PR merge — same change-management discipline as code changes
+- Audit answer to "who decided this was v1.2.0 and why?" — the merged PR shows it
+- The downstream pipeline (release.yml + rollback.yml) is unchanged
+
+**One-time GitHub setting required:**
+
+Settings → Actions → General → Workflow permissions → enable **"Allow GitHub Actions to create and approve pull requests"**. Without this, release-please can't open the release PR.
+
+**Don't want it?** Delete `.github/workflows/release-please.yml`, `release-please-config.json`, and `.release-please-manifest.json`. The rest of the pipeline keeps working with manual tagging.
 
 ## Rollback strategy
 
