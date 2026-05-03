@@ -1,8 +1,8 @@
-# Databricks Apps — CI/CD demo (Git-backed variant)
+# Databricks Apps — CI/CD demo
 
 End-to-end CI/CD reference for a Databricks Apps chatbot that uses **on-behalf-of-user (OBO) authorization**, an **Agent Bricks / Foundation Model serving endpoint**, and **Lakebase** for persistent chat history. Forked and customised from `databricks/app-templates/e2e-chatbot-app-next`.
 
-This branch (`git-backed`) uses [Git-backed app deployment](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy#deploy-from-a-git-repository) (GA 2026-04-21) — the platform pulls source from Git, no workspace-file upload of source code. Compare with `main`, which uploads source via `bundle deploy`.
+Uses [Git-backed app deployment](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy#deploy-from-a-git-repository) (GA 2026-04-21): the platform pulls source from Git on every deploy, no workspace-file upload of source code. The deployment record carries the deployed tag/branch/commit + resolved commit natively, so `databricks apps list-deployments` reads as a self-documenting release ledger.
 
 The point of this repo is the **pipeline shape**, not the chat app itself. Use it as a template platform teams can copy and adapt to their own apps.
 
@@ -30,13 +30,15 @@ The point of this repo is the **pipeline shape**, not the chat app itself. Use i
                   PR open ───────►│ validate.yml│  lint + typecheck + bundle validate
                                   └─────────────┘
                                           │
-                  Merge to main ──────────┴───────►┌──────────────┐
-                                                   │deploy-dev.yml│  bundle deploy + run @ dev
-                                                   └──────────────┘
-
-                                                   ┌──────────────┐
-                  Push tag v* ─────────────────────►│ release.yml  │  staging → manual approval → prod
-                                                   └──────────────┘
+                  Merge to main ──────────┴───────►┌──────────────────┐
+                                                   │ deploy-dev.yml   │  bundle deploy + apps deploy @ dev
+                                                   ├──────────────────┤
+                                                   │release-please.yml│  open / update "Release vX.Y.Z" PR
+                                                   └──────────────────┘
+                                                                            │
+                  Merge release PR (or push v* tag manually) ───────────────┴──►┌──────────────┐
+                                                                                │ release.yml  │  staging → manual approval → prod
+                                                                                └──────────────┘
 
                   Manual rollback ─────────────────►┌──────────────┐
                   (workflow_dispatch + tag input)   │ rollback.yml │  re-deploy older tag to prod
@@ -206,15 +208,15 @@ There is no native one-click rollback in Databricks Apps — both rollback paths
 
 **Why `workflow_dispatch` is primary** (and not just break-glass): it's what [Databricks officially recommends](https://docs.databricks.com/aws/en/dev-tools/ci-cd/best-practices), it preserves the prod approval gate, and it's faster than waiting for a revert PR to traverse the full pipeline. The revert PR is the *trunk-hygiene step*, not the rollback itself.
 
-**Verified rollback flow** (tested 2026-05-01 against the dev workspace — `db-chatbot-prod`):
+**Verified rollback flow** (tested against the demo workspace — `db-chatbot-prod`). Shape of `apps list-deployments` after one release + one rollback:
 
 ```
-2026-05-01 09:38  SUCCEEDED  tag=v0.1.0 (rollback)  resolved=834e83ec5b ← live
-2026-05-01 09:35  SUCCEEDED  tag=v0.2.0             resolved=38d044e63e
-2026-05-01 09:28  SUCCEEDED  tag=v0.1.0 (initial)   resolved=834e83ec5b
+SUCCEEDED  tag=v1.0.0 (rollback)  resolved=f8002ad93a ← live after rollback
+SUCCEEDED  tag=v1.1.0             resolved=84734bd814
+SUCCEEDED  tag=v1.0.0 (initial)   resolved=f8002ad93a
 ```
 
-The placeholder text in the chat input is the visible diff: v0.2.0 shows "Ask anything..."; v0.1.0 shows "Ask a question...". After rollback the placeholder reverts and the deployment ledger gets a new row pointing at the old commit — same git ref as the original v0.1.0, different `deployment_id`, fresh `create_time`.
+The chat input placeholder is the visible diff between the two tags in this repo's history: `v1.0.0` shows "Ask anything..."; `v1.1.0` shows "What can I help with?". Rolling back from `v1.1.0` to `v1.0.0` reverts the placeholder and adds a new row to the deployment ledger pointing at `v1.0.0`'s commit — same git ref as the initial deploy, different `deployment_id`, fresh `create_time`.
 
 **Traceability:** With Git-backed deploy, the deployment record itself carries the Git ref. `databricks apps list-deployments` returns rows where each `git_source` looks like:
 
@@ -253,7 +255,7 @@ STAGING_APP=db-chatbot-staging
 PROD_APP=db-chatbot-prod
 ```
 
-> **Note:** the `--var="git_sha=…"` / `--var="git_ref=…"` overrides on `bundle deploy` are vestigial under Git-backed — the repo's `app.yaml` is the source of truth for the app's runtime env, and `databricks.yml`'s `config.env` block doesn't take effect. The version badge in the running app reads `git_source` from the Apps API instead. The bundle vars still set defaults that show up if you query `databricks bundle summary`, but they don't reach the running app.
+> **Note on env vars vs API-based version display:** older versions of this repo passed `--var="git_sha=…"` / `--var="git_ref=…"` to `bundle deploy` to inject the version into env vars. That pattern doesn't work under Git-backed because the repo's `app.yaml` is the source of truth for the app's runtime env, and `databricks.yml`'s `config.env` block is silently overridden. The bundle vars and the `config.env` block have been removed; the version badge in the running app now reads `git_source` from the Apps API directly (`server/src/routes/config.ts`).
 
 ### Release v1.2.0: tag → staging → prod
 
