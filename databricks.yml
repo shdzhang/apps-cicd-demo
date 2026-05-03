@@ -1,0 +1,124 @@
+bundle:
+  name: databricks-chatbot
+
+# CI/CD reference for an agentic chat app on Databricks Apps:
+# OBO authorization + Agent Bricks (or Foundation Model) + Lakebase chat history.
+#
+# Source delivery: Git-backed deployments (GA 2026-04-21). The app pulls source
+# directly from the Git repo at `git_repository.url`; CI overrides `app_git_ref`
+# per-run to deploy a specific tag/branch/commit.
+#
+# Targets dev / staging / prod share one workspace in this demo (separated by
+# resource_name_suffix). In production, point each target at its own workspace.
+
+variables:
+  serving_endpoint_name:
+    description: "Model serving endpoint (Agent Bricks endpoint or Foundation Model)"
+    default: databricks-claude-sonnet-4
+  database_instance_name:
+    description: "Base name of the Lakebase instance"
+    default: chatbot-lakebase
+  resource_name_suffix:
+    description: "Suffix for app + Lakebase resource names — keeps environments isolated"
+  app_users_group:
+    description: "Account group granted CAN_USE on the app"
+    default: users
+  app_admins_group:
+    description: "Account group granted CAN_MANAGE on the app"
+    default: admins
+  app_git_repository_url:
+    description: "Git repository URL for app source (Git-backed deploy)"
+    default: https://github.com/shdzhang/apps-cicd-demo
+  app_git_ref:
+    description: "Git ref to deploy as the default for `bundle deploy`. CI overrides via `apps deploy --json` per-run."
+    default: main
+
+resources:
+  database_instances:
+    chatbot_lakebase:
+      name: ${var.database_instance_name}-${var.resource_name_suffix}
+      capacity: CU_1
+
+  apps:
+    databricks_chatbot:
+      name: db-chatbot-${var.resource_name_suffix}
+      description: "Agentic chat app — OBO + Agent Bricks + Lakebase"
+
+      # Git-backed deployment — the app fetches source directly from this repo
+      # at the ref specified below. `bundle deploy` applies resource shape;
+      # `apps deploy --json '{"git_source":{...}}'` in CI overrides the ref
+      # per-release.
+      git_repository:
+        provider: gitHub
+        url: ${var.app_git_repository_url}
+      git_source:
+        branch: ${var.app_git_ref}
+
+      # OBO scopes — the agent and Lakebase calls run under the user's identity.
+      # `serving.serving-endpoints` lets the app call the agent endpoint as the user.
+      # `dashboards.genie` enables Genie integration when the agent uses Genie spaces.
+      user_api_scopes:
+        - serving.serving-endpoints
+        - dashboards.genie
+        - sql
+
+      resources:
+        - name: serving-endpoint
+          description: "Agent / Foundation Model serving endpoint"
+          serving_endpoint:
+            name: ${var.serving_endpoint_name}
+            permission: CAN_QUERY
+        - name: database
+          description: "Lakebase database instance for chat history"
+          database:
+            database_name: databricks_postgres
+            instance_name: ${resources.database_instances.chatbot_lakebase.name}
+            permission: CAN_CONNECT_AND_CREATE
+
+      # Note: `config.env` doesn't take effect on Git-backed deploys —
+      # the repo's `app.yaml` is the source of truth for runtime env. Set
+      # any APP_* env vars there instead. The version badge in the app
+      # reads `git_source` from the Apps API at runtime, not from env vars.
+      permissions:
+        - group_name: ${var.app_users_group}
+          level: CAN_USE
+
+# NOTE: workspace host is intentionally NOT hardcoded. The targets reference a
+# named CLI profile (`profile:`) which is configured locally via
+# `databricks auth login --profile <name>`. The actual host URL lives in your
+# local `~/.databrickscfg` and never lands in this repo. CI uses the
+# `DATABRICKS_HOST` / `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` env
+# vars, which take precedence over `profile:` when set.
+#
+# Forking this repo? Change the profile name in all three targets to whatever
+# you ran `databricks auth login --profile <name>` with.
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: azure-szwestus-stable
+    variables:
+      # `domain_friendly_name` sanitizes the email local-part to lowercase
+      # alphanumeric + hyphens — DNS-safe for Lakebase + Databricks Apps names.
+      # (`short_name` would leave dots/underscores in place and break DNS validation.)
+      resource_name_suffix: dev-${workspace.current_user.domain_friendly_name}
+
+  # In CI, each target deploys as a dedicated service principal
+  # (apps-cicd-staging, apps-cicd-prod). The bundle root lands in the SP's
+  # home folder, so different SPs cannot stomp on each other.
+  staging:
+    mode: production
+    workspace:
+      profile: azure-szwestus-stable
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/staging
+    variables:
+      resource_name_suffix: staging
+
+  prod:
+    mode: production
+    workspace:
+      profile: azure-szwestus-stable
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/prod
+    variables:
+      resource_name_suffix: prod

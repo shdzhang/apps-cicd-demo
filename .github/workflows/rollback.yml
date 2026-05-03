@@ -1,0 +1,76 @@
+name: Rollback prod
+
+# Manual rollback: re-deploy a previous tag/commit to prod.
+# This is the rollback story for Databricks Apps — there is no native one-click
+# rollback, so we replay an older Git revision through the same DAB pipeline.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or commit SHA to roll prod back to (e.g. v1.2.0)"
+        required: true
+      reason:
+        description: "Why are you rolling back? (audit trail)"
+        required: true
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: prod  # Same approval gate as release.yml
+    # Shared mutex with release.yml's deploy-prod job — see comment there.
+    concurrency:
+      group: prod-deploy
+      cancel-in-progress: false
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - name: Log rollback intent
+        run: |
+          echo "::notice title=Rollback initiated::Rolling prod to ${{ github.event.inputs.ref }}. Reason: ${{ github.event.inputs.reason }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: databricks/setup-cli@main
+
+      - run: npm ci
+      - run: npm run build:client && npm run build:server
+
+      # Use the SHA of the rolled-back tag, not the workflow trigger's SHA
+      # (which would be main at dispatch time).
+      - name: Capture deployed git ref
+        id: git
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Show prior deployment history (before rollback)
+        run: databricks apps list-deployments db-chatbot-prod --output json | head -80
+
+      - name: Validate bundle
+        run: databricks bundle validate -t prod
+
+      - name: Deploy bundle (resources only — Git-backed source)
+        run: databricks bundle deploy -t prod
+
+      - name: Ensure prod compute is running
+        run: databricks apps start db-chatbot-prod
+
+      # Rollback = deploy an older Git tag through the same pipeline.
+      # `apps list-deployments` will show the deployed tag, so the rollback
+      # event is auditable as "deployed v0.1.0 at <time>".
+      - name: Deploy app from Git (rollback tag)
+        run: |
+          databricks apps deploy db-chatbot-prod \
+            --json "$(printf '{"git_source":{"tag":"%s"}}' "${{ github.event.inputs.ref }}")"
+
+      - name: Show deployment history (after rollback)
+        run: databricks apps list-deployments db-chatbot-prod --output json | head -80

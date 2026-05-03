@@ -1,0 +1,8 @@
+command: ["npm", "run", "start"]
+runtime: nodejs20
+
+env:
+  - name: DATABRICKS_SERVING_ENDPOINT
+    valueFrom: serving-endpoint
+  # APP_VERSION and APP_GIT_REF are injected by the bundle config (databricks.yml)
+  # so the running app can show what build is live.

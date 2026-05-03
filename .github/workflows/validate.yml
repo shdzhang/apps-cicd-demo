@@ -1,0 +1,54 @@
+name: Validate
+
+# Runs on every PR and on pushes to non-main branches.
+# Lint / typecheck / unit tests run with no Databricks creds.
+# Bundle validation runs once per target, each time scoped to that
+# target's GitHub Environment so it picks up the matching SP creds.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run build:client && npm run build:server
+
+      - name: Unit tests
+        run: npx playwright test --project=unit --reporter=list
+
+  bundle-validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dev, staging, prod]
+    environment: ${{ matrix.target }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      - name: Validate ${{ matrix.target }} target
+        run: databricks bundle validate -t ${{ matrix.target }}
